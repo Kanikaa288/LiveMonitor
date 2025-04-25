@@ -1,8 +1,6 @@
 import os
-from google.cloud.sql.connector import Connector
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine,text
 import pandas as pd
-from google.cloud import bigquery
 from dotenv import load_dotenv
 from apscheduler.schedulers.blocking import BlockingScheduler
 from fpdf import FPDF
@@ -12,6 +10,8 @@ import pandas as pd
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
+from reportlab.platypus import Table, TableStyle
+from reportlab.lib import colors
 import os
 # from slack_sdk import WebClient
 # from slack_sdk.errors import SlackApiError
@@ -174,7 +174,7 @@ FROM purchase_agg pa
 CROSS JOIN order_line_agg ola
 CROSS JOIN combined_returns cr
 -- CROSS JOIN vip_data vd
--- CROSS JOIN workflow_data wd;
+-- CROSS JOIN workflow_data wd
 """
 
 # -----------------
@@ -186,7 +186,29 @@ def fetch_and_save_local():
     db_url = f"postgresql+psycopg2://{PG_CONFIG['user']}:{PG_CONFIG['password']}@{PG_CONFIG['host']}:{PG_CONFIG['port']}/{PG_CONFIG['dbname']}?hostaddr={PG_CONFIG['host']}"
     engine = create_engine(db_url)
 
-    df = pd.read_sql(SQL, engine)
+    # with engine.connect() as conn:
+    #     merchant_ids = [row.id for row in conn.execute(text("SELECT id FROM merchant"))]
+
+    merchant_ids = [13927,13918,13916,13529,13632,13652,13509,13497,13934,13546,13552,13504,13488,13494,13483,13502,13387,13510,13503,12302]
+
+    all_metrics = []
+    with engine.connect() as conn:
+        for mid in merchant_ids:
+            merchant_sql = (
+                SQL 
+                + " WHERE pa.merchant_id=" + str(mid)
+                + " AND ola.merchant_id="  + str(mid)
+                + " AND cr.merchant_id="   + str(mid)
+                + ";"
+            )   
+            df_mid = pd.read_sql(merchant_sql,engine)
+            if not df_mid.empty:
+                all_metrics.append(df_mid.iloc[0])   # single-row Series
+
+    # 5) Combine into one DataFrame
+    df = pd.DataFrame(all_metrics)
+
+    # df = pd.read_sql(SQL, engine)
     csv_path = f"daily_merchant_metrics_{pd.Timestamp.today().date()}.csv"
     df.to_csv(csv_path, index=False)
     print(f"Data saved to {csv_path}")
@@ -203,29 +225,84 @@ def generate_pdf(df, output_path="merchant_metrics.pdf"):
     c.drawCentredString(width / 2, height / 2, "Live Monitoring Report")
     c.showPage()
 
+    # time suffixes and labels
+    time_suffixes = ["_now", "_7d", "_wow", "_global"]
+    header = ["Metric", "Now", "Last 7 Days", "Week-over-Week", "Global"]
+
+    def group_metrics(columns):
+        base = {}
+        for col in columns:
+            for suf in time_suffixes:
+                if col.endswith(suf):
+                    name = col[:-len(suf)]
+                    base.setdefault(name, {})[suf] = col
+                    break
+        return base
+
+    grouped_metrics = group_metrics(df.columns)
+
     # --- Pages per Merchant ---
     for _, row in df.iterrows():
         merchant_id = row["merchant_id"]
         c.setFont("Helvetica-Bold", 16)
         c.drawString(1 * inch, height - 1 * inch, f"Merchant ID: {merchant_id}")
 
-        c.setFont("Helvetica", 10)
-        x_pos = 1 * inch
-        y_pos = height - 1.5 * inch
-        line_height = 14
+        # initial y position
+        y = height - 1.5 * inch
+        x = 1 * inch
+        table_w = width - 2 * x
+        col_w = [table_w * 0.4] + [table_w * 0.15] * 4
 
-        for col in df.columns:
-            if col == "merchant_id":
-                continue
-            value = row[col]
-            line = f"{col}: {value:.2f}" if isinstance(value, float) else f"{col}: {value}"
-            c.drawString(x_pos, y_pos, line)
-            y_pos -= line_height
+        # draw the header row once
+        hdr_tbl = Table([header], colWidths=col_w)
+        hdr_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
+        ]))
+        hdr_tbl.wrapOn(c, width, height)
+        hdr_h = hdr_tbl._rowHeights[0]  # grab header height
+        hdr_tbl.drawOn(c, x, y - hdr_h)
+        y -= hdr_h + 10
 
-            # Shift to next column if vertical space is exceeded
-            if y_pos < 1 * inch:
-                x_pos += 3.5 * inch
-                y_pos = height - 1.5 * inch
+        # now draw one values‐row table per metric
+        for metric, cols in grouped_metrics.items():
+            # assemble the single row of values
+            vals = [metric.replace("_", " ").title()]
+            for suf in time_suffixes:
+                col = cols.get(suf)
+                v = row[col] if col else None
+                vals.append(f"{v:.2f}" if isinstance(v, float) else (str(v) if v is not None else "N/A"))
+
+            val_tbl = Table([vals], colWidths=col_w)
+            # you can reuse the grid style but skip the header‐specific styles
+            val_tbl.setStyle(TableStyle([
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
+            ]))
+
+            # wrap & check for page overflow
+            val_tbl.wrapOn(c, width, height)
+            row_h = val_tbl._rowHeights[0]
+            if y - row_h < inch:
+                c.showPage()
+                # redraw merchant header and page header if needed...
+                y = height - 1.5 * inch
+                c.setFont("Helvetica-Bold", 16)
+                c.drawString(x, height - 1 * inch, f"Merchant ID: {merchant_id}")
+                y -= 30  # leave space for header
+
+                # optionally redraw the table header on new page
+                hdr_tbl.drawOn(c, x, y - hdr_h)
+                y -= hdr_h + 10
+
+            val_tbl.drawOn(c, x, y - row_h)
+            y -= row_h + 5
 
         c.showPage()
 

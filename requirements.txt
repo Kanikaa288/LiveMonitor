@@ -1,0 +1,6 @@
+pandas
+sqlalchemy
+python-dotenv
+APScheduler
+fpdf
+reportlab
