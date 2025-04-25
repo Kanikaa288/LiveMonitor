@@ -202,6 +202,7 @@ def fetch_and_save_local():
                 + ";"
             )   
             df_mid = pd.read_sql(merchant_sql,engine)
+            print("Query executed for " + str(mid))
             if not df_mid.empty:
                 all_metrics.append(df_mid.iloc[0])   # single-row Series
 
