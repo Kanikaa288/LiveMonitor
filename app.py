@@ -191,6 +191,7 @@ def fetch_and_save_local():
 
     merchant_ids = [13927,13918,13916,13529,13632,13652,13509,13497,13934,13546,13552,13504,13488,13494,13483,13502,13387,13510,13503,12302]
 
+    # merchant_details = [[row.name for row in conn.execute(text("SELECT name FROM merchant where id=" + str(mid)))] for mid in merchant_ids]
     all_metrics = []
     with engine.connect() as conn:
         for mid in merchant_ids:
@@ -202,9 +203,21 @@ def fetch_and_save_local():
                 + ";"
             )   
             df_mid = pd.read_sql(merchant_sql,engine)
+
+            # 2) fetch merchant name
+            row = conn.execute(
+                text("SELECT name FROM merchant WHERE id = :mid"),
+                {"mid": mid}
+            ).fetchone()
+            merchant_name = row[0] if row else "Unknown"
+
+
             print("Query executed for " + str(mid))
             if not df_mid.empty:
-                all_metrics.append(df_mid.iloc[0])   # single-row Series
+                orig = df_mid.iloc[0]         # may be a view
+                s = orig.copy()               # now guaranteed a separate Series
+                s["merchant_name"] = merchant_name
+                all_metrics.append(s)
 
     # 5) Combine into one DataFrame
     df = pd.DataFrame(all_metrics)
@@ -245,8 +258,12 @@ def generate_pdf(df, output_path="merchant_metrics.pdf"):
     # --- Pages per Merchant ---
     for _, row in df.iterrows():
         merchant_id = row["merchant_id"]
+        merchant_name = row["merchant_name"]
         c.setFont("Helvetica-Bold", 16)
-        c.drawString(1 * inch, height - 1 * inch, f"Merchant ID: {merchant_id}")
+        c.drawString(
+            1*inch, height - 1*inch,
+            f"{merchant_name} (Merchant ID: {merchant_id})"
+        )
 
         # initial y position
         y = height - 1.5 * inch
