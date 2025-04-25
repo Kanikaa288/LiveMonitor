@@ -6,9 +6,15 @@ from email.message import EmailMessage
 from apscheduler.schedulers.blocking import BlockingScheduler
 import os
 from dotenv import load_dotenv
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Slack settings
+SLACK_TOKEN = os.getenv('SLACK_TOKEN')
+slack_client = WebClient(token=SLACK_TOKEN)
 
 # ------------------------------------------------
 # NOTE: Dummy metrics provided for demonstration
@@ -148,6 +154,23 @@ def send_email_report(pdf_paths, recipients):
         smtp.login(os.getenv('EMAIL_USER'), os.getenv('EMAIL_PASSWORD'))
         smtp.send_message(msg)
 
+def send_slack_dm(text,recipients):
+    for email in recipients:
+        try:
+            # 1. Lookup user ID by email
+            resp = slack_client.users_lookupByEmail(email=email)
+            user_id = resp['user']['id']
+
+            # 2. Open or get DM channel
+            dm = slack_client.conversations_open(users=user_id)
+            dm_channel = dm['channel']['id']
+
+            # 3. Send the message
+            slack_client.chat_postMessage(channel=dm_channel, text=text)
+            print(f"Sent DM to {email}")
+        except SlackApiError as e:
+            print(f"Slack error for {email}: {e.response['error']}")
+
 # -----------------
 # Scheduled Job
 # -----------------
@@ -155,13 +178,14 @@ def scheduled_job():
     pdfs = generate_pdf_reports(df_metrics)
     recipients = os.getenv('EMAIL_RECIPIENTS').split(',')
     send_email_report(pdfs, recipients)
+    send_slack_dm(pdfs,recipients)
 
 if __name__ == '__main__':
+    # Run immediately once
+    scheduled_job()
+    # Then schedule future runs
     scheduler = BlockingScheduler()
-    scheduler.add_job(scheduled_job, 'interval', minutes=3)  # Run every 2 minutes
-    print("Scheduler started. Press Ctrl+C to exit.")
-    try:
-        scheduler.start()
-    except (KeyboardInterrupt, SystemExit):
-        pass
+    scheduler.add_job(scheduled_job, 'cron', hour=0, minute=0)  # daily at midnight UTC
+    print('Scheduler started; ran immediately and scheduled daily runs.')
+    scheduler.start()
 
