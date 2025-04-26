@@ -46,93 +46,15 @@ EMAIL_RECIPIENTS = os.getenv('EMAIL_RECIPIENTS', '').split(',')
 # -----------------
 # SQL Query (multi-CTE) to fetch metrics
 # -----------------
-SQL = """
+SQL1 = """
 WITH period AS (
-  SELECT EXTRACT(EPOCH FROM NOW() - INTERVAL '7 days') * 1000 AS ts_min,
-   EXTRACT(EPOCH FROM NOW() - INTERVAL '12 hours') * 1000 AS ts_now,
-  EXTRACT(EPOCH FROM NOW() - INTERVAL '7 days' - INTERVAL '12 hours') * 1000 AS ts_wow
-),
-purchase_agg AS (
   SELECT
-    merchant_id,
-    COUNT(*) FILTER (WHERE timestamp >= p.ts_min) AS order_count_7d,
-	COUNT(*) FILTER (WHERE timestamp >= p.ts_wow) AS order_count_wow,
-	COUNT(*) FILTER (WHERE timestamp >= p.ts_now) AS order_count_now,
-    COUNT(*) AS order_count_global,
-    SUM(amount) FILTER (WHERE timestamp >= p.ts_min) AS order_value_7d,
-    SUM(amount) FILTER (WHERE timestamp >= p.ts_wow) AS order_value_wow,
-    SUM(amount) FILTER (WHERE timestamp >= p.ts_now) AS order_value_now,
-    SUM(amount) AS order_value_global,
-    SUM(CASE WHEN timestamp >= p.ts_min AND decision = 'REVIEW' THEN 1 ELSE 0 END) AS review_count_7d,
-    SUM(CASE WHEN timestamp >= p.ts_wow AND decision = 'REVIEW' THEN 1 ELSE 0 END) AS review_count_wow,
-    SUM(CASE WHEN timestamp >= p.ts_now AND decision = 'REVIEW' THEN 1 ELSE 0 END) AS review_count_now,
-    SUM(CASE WHEN decision = 'REVIEW' THEN 1 ELSE 0 END) AS review_count_global,
-    COUNT(DISTINCT customer_id) FILTER (WHERE timestamp >= p.ts_min) AS unique_customers_7d,
-    COUNT(DISTINCT customer_id) FILTER (WHERE timestamp >= p.ts_wow) AS unique_customers_wow,
-    COUNT(DISTINCT customer_id) FILTER (WHERE timestamp >= p.ts_now) AS unique_customers_now,
-    COUNT(DISTINCT customer_id) AS unique_customers_global
-  FROM purchase, period p
-  GROUP BY merchant_id
-),
-combined_returns AS (
-  SELECT
-  	rr.merchant_id,
-    SUM(rd.amount * rd.quantity) FILTER (WHERE rr.initiated_at >= p.ts_min) AS return_value_7d,
-    SUM(rd.amount * rd.quantity) FILTER (WHERE rr.initiated_at >= p.ts_wow) AS return_value_wow,
-    SUM(rd.amount * rd.quantity) FILTER (WHERE rr.initiated_at >= p.ts_now) AS return_value_now,
-    SUM(rd.amount * rd.quantity) AS return_value_global,
-    COUNT(distinct rr.return_id) FILTER (WHERE rr.initiated_at >= p.ts_min) AS return_count_7d,
-    COUNT(distinct rr.return_id) FILTER (WHERE rr.initiated_at >= p.ts_wow) AS return_count_wow,
-    COUNT(distinct rr.return_id) FILTER (WHERE rr.initiated_at >= p.ts_now) AS return_count_now,
-    COUNT(distinct rr.return_id) AS return_count_global
-  FROM return_request rr
-  JOIN return_details rd ON rd.return_id = rr.return_id
-  CROSS JOIN period p
-  group by rr.merchant_id
-),
-order_line_agg AS (
-  SELECT
-  co.merchant_id,
-    COUNT(DISTINCT co.id) FILTER (WHERE p.timestamp >= period.ts_min) AS order_line_count_7d,
-    COUNT(DISTINCT co.id) FILTER (WHERE p.timestamp >= period.ts_wow) AS order_line_count_wow,
-    COUNT(DISTINCT co.id) FILTER (WHERE p.timestamp >= period.ts_now) AS order_line_count_now,
-    COUNT(DISTINCT co.id) AS order_line_count_global
-  FROM purchase p
-  JOIN cart_item co ON co.purchase_order = p.order_id
-  CROSS JOIN period
-  GROUP BY co.merchant_id
+    (EXTRACT(EPOCH FROM NOW() - INTERVAL '7 days') * 1000)::bigint AS ts_min,
+    (EXTRACT(EPOCH FROM NOW() - INTERVAL '24 hours') * 1000)::bigint AS ts_now,
+    (EXTRACT(EPOCH FROM NOW() - INTERVAL '7 days 24 hours') * 1000)::bigint AS ts_wow
 )
--- ,
-
--- vip_data AS (
---   SELECT
---     (COUNT(*) FILTER (WHERE cnt_7d > 1 ))::numeric / NULLIF(COUNT(*), 0) AS vip_rate_7d,
---     (COUNT(*) FILTER (WHERE cnt_global > 1))::numeric / NULLIF(COUNT(*), 0) AS vip_rate_global
---   FROM (
---     SELECT
---       COUNT(*) FILTER (WHERE timestamp >= p.ts_min) AS cnt_7d,
---       COUNT(*) AS cnt_global
---     FROM purchase, period p
---     GROUP BY customer_id
---   ) customer_counts
--- ),
--- workflow_data AS (
---   SELECT
---     JSON_OBJECT_AGG(triggered_workflow, cnt_7d) AS workflow_dist_7d,
---     JSON_OBJECT_AGG(triggered_workflow, cnt_global) AS workflow_dist_global
---   FROM (
---     SELECT
---       triggered_workflow,
---       COUNT(*) FILTER (WHERE timestamp >= p.ts_min) AS cnt_7d,
---       COUNT(*) AS cnt_global
---     FROM purchase, period p
---     WHERE decision = 'REVIEW'
---       AND triggered_workflow IS NOT NULL
---     GROUP BY triggered_workflow
---   ) sub
--- )
 SELECT
-	pa.merchant_id,
+  pa.merchant_id,
   pa.order_count_7d,
   pa.order_count_wow,
   pa.order_count_now,
@@ -153,10 +75,18 @@ SELECT
   cr.return_value_wow,
   cr.return_value_now,
   cr.return_value_global,
-  COALESCE(cr.return_value_7d, 0) / NULLIF(pa.order_value_7d, 0) AS return_rate_value_7d,
-  COALESCE(cr.return_value_wow, 0) / NULLIF(pa.order_value_wow, 0) AS return_rate_value_wow,
-  COALESCE(cr.return_value_now, 0) / NULLIF(pa.order_value_now, 0) AS return_rate_value_now,
-  COALESCE(cr.return_value_global, 0) / NULLIF(pa.order_value_global, 0) AS return_rate_value_global,
+  cr.approve_count_7d,
+  cr.approve_count_wow,
+  cr.approve_count_now,
+  cr.approve_count_global,
+  cr.decline_count_7d,
+  cr.decline_count_wow,
+  cr.decline_count_now,
+  cr.decline_count_global,
+  COALESCE(cr.return_value_7d, 0) / NULLIF(pa.order_value_7d, 0) AS return_rate_7d,
+  COALESCE(cr.return_value_wow, 0) / NULLIF(pa.order_value_wow, 0) AS return_rate_wow,
+  COALESCE(cr.return_value_now, 0) / NULLIF(pa.order_value_now, 0) AS return_rate_now,
+  COALESCE(cr.return_value_global, 0) / NULLIF(pa.order_value_global, 0) AS return_rate_global,
   pa.review_count_7d,
   pa.review_count_wow,
   pa.review_count_now,
@@ -165,16 +95,69 @@ SELECT
   pa.review_count_wow::numeric / NULLIF(pa.order_count_wow, 0) AS review_rate_wow,
   pa.review_count_now::numeric / NULLIF(pa.order_count_now, 0) AS review_rate_now,
   pa.review_count_global::numeric / NULLIF(pa.order_count_global, 0) AS review_rate_global
-  -- ,
-  -- vd.vip_rate_7d,
-  -- vd.vip_rate_global,
-  -- wd.workflow_dist_7d,
-  -- wd.workflow_dist_global
-FROM purchase_agg pa
-CROSS JOIN order_line_agg ola
-CROSS JOIN combined_returns cr
--- CROSS JOIN vip_data vd
--- CROSS JOIN workflow_data wd
+FROM (
+  SELECT
+    merchant_id,
+    COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_min FROM period)) AS order_count_7d,
+    COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period)) AS order_count_wow,
+    COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_now FROM period)) AS order_count_now,
+    COUNT(*) AS order_count_global,
+    SUM(amount) FILTER (WHERE timestamp >= (SELECT ts_min FROM period)) AS order_value_7d,
+    SUM(amount) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period)) AS order_value_wow,
+    SUM(amount) FILTER (WHERE timestamp >= (SELECT ts_now FROM period)) AS order_value_now,
+    SUM(amount) AS order_value_global,
+    COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_min FROM period) AND decision = 'REVIEW') AS review_count_7d,
+    COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period) AND decision = 'REVIEW') AS review_count_wow,
+    COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_now FROM period) AND decision = 'REVIEW') AS review_count_now,
+    COUNT(*) FILTER (WHERE decision = 'REVIEW') AS review_count_global,
+    COUNT(DISTINCT customer_id) FILTER (WHERE timestamp >= (SELECT ts_min FROM period)) AS unique_customers_7d,
+    COUNT(DISTINCT customer_id) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period)) AS unique_customers_wow,
+    COUNT(DISTINCT customer_id) FILTER (WHERE timestamp >= (SELECT ts_now FROM period)) AS unique_customers_now,
+    COUNT(DISTINCT customer_id) AS unique_customers_global
+  FROM purchase
+  WHERE merchant_id = """
+
+SQL2 = """
+  GROUP BY merchant_id
+) pa
+JOIN (
+  SELECT
+    co.merchant_id,
+    COUNT(DISTINCT co.id) FILTER (WHERE p.timestamp >= (SELECT ts_min FROM period)) AS order_line_count_7d,
+    COUNT(DISTINCT co.id) FILTER (WHERE p.timestamp >= (SELECT ts_wow FROM period)) AS order_line_count_wow,
+    COUNT(DISTINCT co.id) FILTER (WHERE p.timestamp >= (SELECT ts_now FROM period)) AS order_line_count_now,
+    COUNT(DISTINCT co.id) AS order_line_count_global
+  FROM purchase p
+  JOIN cart_item co ON co.purchase_order = p.order_id
+  WHERE p.merchant_id = """
+
+SQL3 = """ GROUP BY co.merchant_id
+) ola ON pa.merchant_id = ola.merchant_id
+LEFT JOIN (
+  SELECT
+    rr.merchant_id,
+    SUM(rd.amount * rd.quantity) FILTER (WHERE rr.initiated_at >= (SELECT ts_min FROM period)) AS return_value_7d,
+    SUM(rd.amount * rd.quantity) FILTER (WHERE rr.initiated_at >= (SELECT ts_wow FROM period)) AS return_value_wow,
+    SUM(rd.amount * rd.quantity) FILTER (WHERE rr.initiated_at >= (SELECT ts_now FROM period)) AS return_value_now,
+    SUM(rd.amount * rd.quantity) AS return_value_global,
+    COUNT(DISTINCT rr.return_id) FILTER (WHERE rr.initiated_at >= (SELECT ts_min FROM period)) AS return_count_7d,
+    COUNT(DISTINCT rr.return_id) FILTER (WHERE rr.initiated_at >= (SELECT ts_wow FROM period)) AS return_count_wow,
+    COUNT(DISTINCT rr.return_id) FILTER (WHERE rr.initiated_at >= (SELECT ts_now FROM period)) AS return_count_now,
+    COUNT(DISTINCT rr.return_id) AS return_count_global,
+	count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_min FROM period) and rr.review_status = 1) AS approve_count_7d,
+	count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_wow FROM period) and rr.review_status = 1) AS approve_count_wow,
+	count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_now FROM period) and rr.review_status = 1) AS approve_count_now,
+	count(*) FILTER (where rr.review_status = 1) As approve_count_global,
+	count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_min FROM period) and rr.review_status = 2) AS decline_count_7d,
+	count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_wow FROM period) and rr.review_status = 2) AS decline_count_wow,
+	count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_now FROM period) and rr.review_status = 2) AS decline_count_now,
+	count(*) FILTER (where rr.review_status = 2) As decline_count_global
+  FROM return_request rr
+  JOIN return_details rd ON rd.return_id = rr.return_id
+  WHERE rr.merchant_id = """
+
+SQL4 = """ GROUP BY rr.merchant_id
+) cr ON pa.merchant_id = cr.merchant_id;
 """
 
 # -----------------
@@ -196,11 +179,10 @@ def fetch_and_save_local():
     with engine.connect() as conn:
         for mid in merchant_ids:
             merchant_sql = (
-                SQL 
-                + " WHERE pa.merchant_id=" + str(mid)
-                + " AND ola.merchant_id="  + str(mid)
-                + " AND cr.merchant_id="   + str(mid)
-                + ";"
+                SQL1 
+                + str(mid) + SQL2
+                + str(mid) + SQL3
+                + str(mid) + SQL4
             )   
             df_mid = pd.read_sql(merchant_sql,engine)
 
@@ -231,6 +213,7 @@ def fetch_and_save_local():
 
 # PDF generation class
 def generate_pdf(df, output_path="merchant_metrics.pdf"):
+    df = df.fillna("N/A")
     c = canvas.Canvas(output_path, pagesize=A4)
     width, height = A4
 
@@ -241,7 +224,7 @@ def generate_pdf(df, output_path="merchant_metrics.pdf"):
 
     # time suffixes and labels
     time_suffixes = ["_now", "_7d", "_wow", "_global"]
-    header = ["Metric", "Now", "Last 7 Days", "Week-over-Week", "Global"]
+    header = ["Metric", "Last 24 hours", "Last 7 Days", "(WoW - Last 24 hrs)", "Lifetime"]
 
     def group_metrics(columns):
         base = {}
@@ -261,17 +244,16 @@ def generate_pdf(df, output_path="merchant_metrics.pdf"):
         merchant_name = row["merchant_name"]
         c.setFont("Helvetica-Bold", 16)
         c.drawString(
-            1*inch, height - 1*inch,
+            1 * inch, height - 1 * inch,
             f"{merchant_name} (Merchant ID: {merchant_id})"
         )
 
-        # initial y position
         y = height - 1.5 * inch
         x = 1 * inch
         table_w = width - 2 * x
-        col_w = [table_w * 0.4] + [table_w * 0.15] * 4
+        col_w = [table_w * 0.25] + [table_w * 0.1875] * 4
 
-        # draw the header row once
+
         hdr_tbl = Table([header], colWidths=col_w)
         hdr_tbl.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.grey),
@@ -283,39 +265,65 @@ def generate_pdf(df, output_path="merchant_metrics.pdf"):
             ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
         ]))
         hdr_tbl.wrapOn(c, width, height)
-        hdr_h = hdr_tbl._rowHeights[0]  # grab header height
+        hdr_h = hdr_tbl._rowHeights[0]
         hdr_tbl.drawOn(c, x, y - hdr_h)
         y -= hdr_h + 10
 
-        # now draw one values‐row table per metric
         for metric, cols in grouped_metrics.items():
-            # assemble the single row of values
             vals = [metric.replace("_", " ").title()]
+            now_val = row.get(cols.get("_now")) if "_now" in cols else None
+
             for suf in time_suffixes:
                 col = cols.get(suf)
-                v = row[col] if col else None
-                vals.append(f"{v:.2f}" if isinstance(v, float) else (str(v) if v is not None else "N/A"))
+                if suf == "_wow":
+                    wow_val = row.get(col) if col else None
+                    if isinstance(wow_val, float) and isinstance(now_val, float):
+                        diff = wow_val - now_val
+                        if diff==0:
+                            if "count" in metric:
+                                val = f"{int(v):,}"
+                            else:
+                                val = f"{diff:,.2f}"
+                        else:
+                            if "count" in metric:
+                                val = f"{int(v):+,}"
+                            else:
+                                val = f"{diff:+,.2f}"
+                    else:
+                        val = "N/A"
+                else:
+                    v = row.get(col) if col else None
+                    if isinstance(v, float):
+                        if "count" in metric: val = f"{int(v):,}" 
+                        else: val = f"{v:,.2f}"
+                    elif v == "N/A" or pd.isna(v):
+                        val = "N/A"
+                    else:
+                        val = f"{int(v):,}"
+
+                # Format with % or $ if applicable
+                if "rate" in metric and val.replace(",","").replace(".", "").isdigit():
+                    val = f"{val}%"
+                elif "value" in metric and val.replace(",","").replace(".", "").isdigit():
+                    val = f"${val}"
+
+                vals.append(val)
 
             val_tbl = Table([vals], colWidths=col_w)
-            # you can reuse the grid style but skip the header‐specific styles
             val_tbl.setStyle(TableStyle([
                 ("ALIGN", (0, 0), (-1, -1), "CENTER"),
                 ("FONTSIZE", (0, 0), (-1, -1), 9),
                 ("GRID", (0, 0), (-1, -1), 0.25, colors.black),
             ]))
 
-            # wrap & check for page overflow
             val_tbl.wrapOn(c, width, height)
             row_h = val_tbl._rowHeights[0]
             if y - row_h < inch:
                 c.showPage()
-                # redraw merchant header and page header if needed...
                 y = height - 1.5 * inch
                 c.setFont("Helvetica-Bold", 16)
                 c.drawString(x, height - 1 * inch, f"Merchant ID: {merchant_id}")
-                y -= 30  # leave space for header
-
-                # optionally redraw the table header on new page
+                y -= 30
                 hdr_tbl.drawOn(c, x, y - hdr_h)
                 y -= hdr_h + 10
 
@@ -368,6 +376,7 @@ def scheduled_job():
     df = fetch_and_save_local()
     if not df.empty:
         pdfs = generate_pdf(df)
+        print("pdf generated")
         send_email_report(pdfs)
         # send_slack_dm(pdfs)
     else:
@@ -380,7 +389,7 @@ if __name__ == '__main__':
     print("started scheduling")
     scheduled_job()
     scheduler = BlockingScheduler()
-    scheduler.add_job(scheduled_job, 'interval', minutes=1)  # Run every 2 minutes
+    # scheduler.add_job(scheduled_job, 'interval', minutes=1)  # Run every 2 minutes
     print("Scheduler started. Press Ctrl+C to exit.")
     try:
         scheduler.start()
