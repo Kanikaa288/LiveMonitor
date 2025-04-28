@@ -2,7 +2,7 @@ WITH period AS (
   SELECT
     (EXTRACT(EPOCH FROM NOW() - INTERVAL '7 days') * 1000)::bigint AS ts_min,
     (EXTRACT(EPOCH FROM NOW() - INTERVAL '24 hours') * 1000)::bigint AS ts_now,
-    (EXTRACT(EPOCH FROM NOW() - INTERVAL '7 days 24 hours') * 1000)::bigint AS ts_wow
+    (EXTRACT(EPOCH FROM NOW() - INTERVAL '8 days') * 1000)::bigint AS ts_wow
 )
 SELECT
   pa.merchant_id,
@@ -50,19 +50,19 @@ FROM (
   SELECT
     merchant_id,
     COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_min FROM period)) AS order_count_7d,
-    COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period)) AS order_count_wow,
+    COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period) and timestamp <= (SELECT ts_min FROM period)) AS order_count_wow,
     COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_now FROM period)) AS order_count_now,
     COUNT(*) AS order_count_global,
     SUM(amount) FILTER (WHERE timestamp >= (SELECT ts_min FROM period)) AS order_value_7d,
-    SUM(amount) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period)) AS order_value_wow,
+    SUM(amount) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period) and timestamp <= (SELECT ts_min FROM period)) AS order_value_wow,
     SUM(amount) FILTER (WHERE timestamp >= (SELECT ts_now FROM period)) AS order_value_now,
     SUM(amount) AS order_value_global,
     COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_min FROM period) AND decision = 'REVIEW') AS review_count_7d,
-    COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period) AND decision = 'REVIEW') AS review_count_wow,
+    COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period) and timestamp <= (SELECT ts_min FROM period) AND decision = 'REVIEW') AS review_count_wow,
     COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_now FROM period) AND decision = 'REVIEW') AS review_count_now,
     COUNT(*) FILTER (WHERE decision = 'REVIEW') AS review_count_global,
     COUNT(DISTINCT customer_id) FILTER (WHERE timestamp >= (SELECT ts_min FROM period)) AS unique_customers_7d,
-    COUNT(DISTINCT customer_id) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period)) AS unique_customers_wow,
+    COUNT(DISTINCT customer_id) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period) and timestamp <= (SELECT ts_min FROM period)) AS unique_customers_wow,
     COUNT(DISTINCT customer_id) FILTER (WHERE timestamp >= (SELECT ts_now FROM period)) AS unique_customers_now,
     COUNT(DISTINCT customer_id) AS unique_customers_global
   FROM purchase
@@ -73,7 +73,7 @@ JOIN (
   SELECT
     co.merchant_id,
     COUNT(DISTINCT co.id) FILTER (WHERE p.timestamp >= (SELECT ts_min FROM period)) AS order_line_count_7d,
-    COUNT(DISTINCT co.id) FILTER (WHERE p.timestamp >= (SELECT ts_wow FROM period)) AS order_line_count_wow,
+    COUNT(DISTINCT co.id) FILTER (WHERE p.timestamp >= (SELECT ts_wow FROM period) and p.timestamp <= (SELECT ts_min FROM period)) AS order_line_count_wow,
     COUNT(DISTINCT co.id) FILTER (WHERE p.timestamp >= (SELECT ts_now FROM period)) AS order_line_count_now,
     COUNT(DISTINCT co.id) AS order_line_count_global
   FROM purchase p
@@ -85,21 +85,21 @@ LEFT JOIN (
   SELECT
     rr.merchant_id,
     SUM(rd.amount * rd.quantity) FILTER (WHERE rr.initiated_at >= (SELECT ts_min FROM period)) AS return_value_7d,
-    SUM(rd.amount * rd.quantity) FILTER (WHERE rr.initiated_at >= (SELECT ts_wow FROM period)) AS return_value_wow,
+    SUM(rd.amount * rd.quantity) FILTER (WHERE rr.initiated_at >= (SELECT ts_wow FROM period) and rr.initiated_at <= (SELECT ts_min FROM period)) AS return_value_wow,
     SUM(rd.amount * rd.quantity) FILTER (WHERE rr.initiated_at >= (SELECT ts_now FROM period)) AS return_value_now,
     SUM(rd.amount * rd.quantity) AS return_value_global,
     COUNT(DISTINCT rr.return_id) FILTER (WHERE rr.initiated_at >= (SELECT ts_min FROM period)) AS return_count_7d,
-    COUNT(DISTINCT rr.return_id) FILTER (WHERE rr.initiated_at >= (SELECT ts_wow FROM period)) AS return_count_wow,
+    COUNT(DISTINCT rr.return_id) FILTER (WHERE rr.initiated_at >= (SELECT ts_wow FROM period) and rr.initiated_at <= (SELECT ts_min FROM period)) AS return_count_wow,
     COUNT(DISTINCT rr.return_id) FILTER (WHERE rr.initiated_at >= (SELECT ts_now FROM period)) AS return_count_now,
     COUNT(DISTINCT rr.return_id) AS return_count_global,
-	count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_min FROM period) and rr.review_status = 1) AS approve_count_7d,
-	count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_wow FROM period) and rr.review_status = 1) AS approve_count_wow,
-	count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_now FROM period) and rr.review_status = 1) AS approve_count_now,
-	count(*) FILTER (where rr.review_status = 1) As approve_count_global,
-	count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_min FROM period) and rr.review_status = 2) AS decline_count_7d,
-	count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_wow FROM period) and rr.review_status = 2) AS decline_count_wow,
-	count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_now FROM period) and rr.review_status = 2) AS decline_count_now,
-	count(*) FILTER (where rr.review_status = 2) As decline_count_global
+    count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_min FROM period) and rr.review_status = 1) AS approve_count_7d,
+    count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_wow FROM period) and rr.updated_at <= (SELECT ts_min FROM period) and rr.review_status = 1) AS approve_count_wow,
+    count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_now FROM period) and rr.review_status = 1) AS approve_count_now,
+    count(*) FILTER (where rr.review_status = 1) As approve_count_global,
+    count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_min FROM period) and rr.review_status = 2) AS decline_count_7d,
+    count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_wow FROM period) and rr.updated_at <= (SELECT ts_min FROM period) and rr.review_status = 2) AS decline_count_wow,
+    count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_now FROM period) and rr.review_status = 2) AS decline_count_now,
+    count(*) FILTER (where rr.review_status = 2) As decline_count_global
   FROM return_request rr
   JOIN return_details rd ON rd.return_id = rr.return_id
   WHERE rr.merchant_id = 13927

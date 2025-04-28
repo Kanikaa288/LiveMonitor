@@ -1,28 +1,38 @@
 import os
-from sqlalchemy import create_engine,text
+import logging
+from sqlalchemy import create_engine, text
 import pandas as pd
 from dotenv import load_dotenv
 from apscheduler.schedulers.blocking import BlockingScheduler
 from fpdf import FPDF
 import smtplib
 from email.message import EmailMessage
-import pandas as pd
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
 from reportlab.platypus import Table, TableStyle
 from reportlab.lib import colors
-import os
-# from slack_sdk import WebClient
-# from slack_sdk.errors import SlackApiError
 
+# -----------------
+# Setup Logging
+# -----------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# -----------------
 # Load environment variables
+# -----------------
 load_dotenv()
 
 # -----------------
 # Configuration
 # -----------------
-# PostgreSQL connection (not used directly for PDF/email)
 PG_CONFIG = {
     'host': os.getenv('PG_HOST'),
     'port': int(os.getenv('PG_PORT', 5432)),
@@ -31,27 +41,20 @@ PG_CONFIG = {
     'password': os.getenv('PG_PASSWORD')
 }
 
-# Email settings
 EMAIL_USER = os.getenv('EMAIL_USER')
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
 SMTP_SERVER = os.getenv('SMTP_SERVER')
 SMTP_PORT = int(os.getenv('SMTP_PORT', 587))
 EMAIL_RECIPIENTS = os.getenv('EMAIL_RECIPIENTS', '').split(',')
 
-
-# Slack settings
-# SLACK_TOKEN = os.getenv('SLACK_TOKEN')
-# slack_client = WebClient(token=SLACK_TOKEN)
-
 # -----------------
-# SQL Query (multi-CTE) to fetch metrics
+# SQL Queries
 # -----------------
-SQL1 = """
-WITH period AS (
+SQL1 = """ WITH period AS (
   SELECT
     (EXTRACT(EPOCH FROM NOW() - INTERVAL '7 days') * 1000)::bigint AS ts_min,
     (EXTRACT(EPOCH FROM NOW() - INTERVAL '24 hours') * 1000)::bigint AS ts_now,
-    (EXTRACT(EPOCH FROM NOW() - INTERVAL '7 days 24 hours') * 1000)::bigint AS ts_wow
+    (EXTRACT(EPOCH FROM NOW() - INTERVAL '8 days') * 1000)::bigint AS ts_wow
 )
 SELECT
   pa.merchant_id,
@@ -99,132 +102,123 @@ FROM (
   SELECT
     merchant_id,
     COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_min FROM period)) AS order_count_7d,
-    COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period)) AS order_count_wow,
+    COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period) and timestamp <= (SELECT ts_min FROM period)) AS order_count_wow,
     COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_now FROM period)) AS order_count_now,
     COUNT(*) AS order_count_global,
     SUM(amount) FILTER (WHERE timestamp >= (SELECT ts_min FROM period)) AS order_value_7d,
-    SUM(amount) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period)) AS order_value_wow,
+    SUM(amount) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period) and timestamp <= (SELECT ts_min FROM period)) AS order_value_wow,
     SUM(amount) FILTER (WHERE timestamp >= (SELECT ts_now FROM period)) AS order_value_now,
     SUM(amount) AS order_value_global,
     COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_min FROM period) AND decision = 'REVIEW') AS review_count_7d,
-    COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period) AND decision = 'REVIEW') AS review_count_wow,
+    COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period) and timestamp <= (SELECT ts_min FROM period) AND decision = 'REVIEW') AS review_count_wow,
     COUNT(*) FILTER (WHERE timestamp >= (SELECT ts_now FROM period) AND decision = 'REVIEW') AS review_count_now,
     COUNT(*) FILTER (WHERE decision = 'REVIEW') AS review_count_global,
     COUNT(DISTINCT customer_id) FILTER (WHERE timestamp >= (SELECT ts_min FROM period)) AS unique_customers_7d,
-    COUNT(DISTINCT customer_id) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period)) AS unique_customers_wow,
+    COUNT(DISTINCT customer_id) FILTER (WHERE timestamp >= (SELECT ts_wow FROM period) and timestamp <= (SELECT ts_min FROM period)) AS unique_customers_wow,
     COUNT(DISTINCT customer_id) FILTER (WHERE timestamp >= (SELECT ts_now FROM period)) AS unique_customers_now,
     COUNT(DISTINCT customer_id) AS unique_customers_global
   FROM purchase
   WHERE merchant_id = """
-
-SQL2 = """
-  GROUP BY merchant_id
+SQL2 = """ 
+GROUP BY merchant_id
 ) pa
 JOIN (
   SELECT
     co.merchant_id,
     COUNT(DISTINCT co.id) FILTER (WHERE p.timestamp >= (SELECT ts_min FROM period)) AS order_line_count_7d,
-    COUNT(DISTINCT co.id) FILTER (WHERE p.timestamp >= (SELECT ts_wow FROM period)) AS order_line_count_wow,
+    COUNT(DISTINCT co.id) FILTER (WHERE p.timestamp >= (SELECT ts_wow FROM period) and p.timestamp <= (SELECT ts_min FROM period)) AS order_line_count_wow,
     COUNT(DISTINCT co.id) FILTER (WHERE p.timestamp >= (SELECT ts_now FROM period)) AS order_line_count_now,
     COUNT(DISTINCT co.id) AS order_line_count_global
   FROM purchase p
   JOIN cart_item co ON co.purchase_order = p.order_id
-  WHERE p.merchant_id = """
-
-SQL3 = """ GROUP BY co.merchant_id
+  WHERE p.merchant_id =  """
+SQL3 = """ 
+GROUP BY co.merchant_id
 ) ola ON pa.merchant_id = ola.merchant_id
 LEFT JOIN (
   SELECT
     rr.merchant_id,
     SUM(rd.amount * rd.quantity) FILTER (WHERE rr.initiated_at >= (SELECT ts_min FROM period)) AS return_value_7d,
-    SUM(rd.amount * rd.quantity) FILTER (WHERE rr.initiated_at >= (SELECT ts_wow FROM period)) AS return_value_wow,
+    SUM(rd.amount * rd.quantity) FILTER (WHERE rr.initiated_at >= (SELECT ts_wow FROM period) and rr.initiated_at <= (SELECT ts_min FROM period)) AS return_value_wow,
     SUM(rd.amount * rd.quantity) FILTER (WHERE rr.initiated_at >= (SELECT ts_now FROM period)) AS return_value_now,
     SUM(rd.amount * rd.quantity) AS return_value_global,
     COUNT(DISTINCT rr.return_id) FILTER (WHERE rr.initiated_at >= (SELECT ts_min FROM period)) AS return_count_7d,
-    COUNT(DISTINCT rr.return_id) FILTER (WHERE rr.initiated_at >= (SELECT ts_wow FROM period)) AS return_count_wow,
+    COUNT(DISTINCT rr.return_id) FILTER (WHERE rr.initiated_at >= (SELECT ts_wow FROM period) and rr.initiated_at <= (SELECT ts_min FROM period)) AS return_count_wow,
     COUNT(DISTINCT rr.return_id) FILTER (WHERE rr.initiated_at >= (SELECT ts_now FROM period)) AS return_count_now,
     COUNT(DISTINCT rr.return_id) AS return_count_global,
-	count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_min FROM period) and rr.review_status = 1) AS approve_count_7d,
-	count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_wow FROM period) and rr.review_status = 1) AS approve_count_wow,
-	count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_now FROM period) and rr.review_status = 1) AS approve_count_now,
-	count(*) FILTER (where rr.review_status = 1) As approve_count_global,
-	count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_min FROM period) and rr.review_status = 2) AS decline_count_7d,
-	count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_wow FROM period) and rr.review_status = 2) AS decline_count_wow,
-	count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_now FROM period) and rr.review_status = 2) AS decline_count_now,
-	count(*) FILTER (where rr.review_status = 2) As decline_count_global
+    count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_min FROM period) and rr.review_status = 1) AS approve_count_7d,
+    count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_wow FROM period) and rr.updated_at <= (SELECT ts_min FROM period) and rr.review_status = 1) AS approve_count_wow,
+    count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_now FROM period) and rr.review_status = 1) AS approve_count_now,
+    count(*) FILTER (where rr.review_status = 1) As approve_count_global,
+    count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_min FROM period) and rr.review_status = 2) AS decline_count_7d,
+    count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_wow FROM period) and rr.updated_at <= (SELECT ts_min FROM period) and rr.review_status = 2) AS decline_count_wow,
+    count(*) FILTER (WHERE rr.updated_at >= (SELECT ts_now FROM period) and rr.review_status = 2) AS decline_count_now,
+    count(*) FILTER (where rr.review_status = 2) As decline_count_global
   FROM return_request rr
   JOIN return_details rd ON rd.return_id = rr.return_id
-  WHERE rr.merchant_id = """
-
-SQL4 = """ GROUP BY rr.merchant_id
-) cr ON pa.merchant_id = cr.merchant_id;
-"""
+  WHERE rr.merchant_id =  """
+SQL4 = """ 
+GROUP BY rr.merchant_id
+) cr ON pa.merchant_id = cr.merchant_id; """
 
 # -----------------
 # Functions
 # -----------------
 
 def fetch_and_save_local():
-    # Build a **bare** URL with no host/port in it
+    logger.info("Starting data fetch and save locally.")
     db_url = f"postgresql+psycopg2://{PG_CONFIG['user']}:{PG_CONFIG['password']}@{PG_CONFIG['host']}:{PG_CONFIG['port']}/{PG_CONFIG['dbname']}?hostaddr={PG_CONFIG['host']}"
     engine = create_engine(db_url)
 
-    # with engine.connect() as conn:
-    #     merchant_ids = [row.id for row in conn.execute(text("SELECT id FROM merchant"))]
-
     merchant_ids = [13927,13918,13916,13529,13632,13652,13509,13497,13934,13546,13552,13504,13488,13494,13483,13502,13387,13510,13503,12302]
-
-    # merchant_details = [[row.name for row in conn.execute(text("SELECT name FROM merchant where id=" + str(mid)))] for mid in merchant_ids]
     all_metrics = []
+
     with engine.connect() as conn:
         for mid in merchant_ids:
             merchant_sql = (
-                SQL1 
-                + str(mid) + SQL2
-                + str(mid) + SQL3
-                + str(mid) + SQL4
+                SQL1 + str(mid) + SQL2 + str(mid) + SQL3 + str(mid) + SQL4
             )   
-            df_mid = pd.read_sql(merchant_sql,engine)
+            df_mid = pd.read_sql(merchant_sql, engine)
 
-            # 2) fetch merchant name
             row = conn.execute(
                 text("SELECT name FROM merchant WHERE id = :mid"),
                 {"mid": mid}
             ).fetchone()
             merchant_name = row[0] if row else "Unknown"
 
-
-            print("Query executed for " + str(mid))
+            logger.info(f"Query executed and merchant fetched for ID: {mid} ({merchant_name})")
             if not df_mid.empty:
-                orig = df_mid.iloc[0]         # may be a view
-                s = orig.copy()               # now guaranteed a separate Series
+                orig = df_mid.iloc[0]
+                s = orig.copy()
                 s["merchant_name"] = merchant_name
                 all_metrics.append(s)
+            else:
+                logger.warning(f"No data found for merchant_id {mid}")
 
-    # 5) Combine into one DataFrame
     df = pd.DataFrame(all_metrics)
 
-    # df = pd.read_sql(SQL, engine)
-    csv_path = f"daily_merchant_metrics_{pd.Timestamp.today().date()}.csv"
-    df.to_csv(csv_path, index=False)
-    print(f"Data saved to {csv_path}")
+    if not df.empty:
+        csv_path = f"daily_merchant_metrics_{pd.Timestamp.today().date()}.csv"
+        df.to_csv(csv_path, index=False)
+        logger.info(f"Data saved to {csv_path}")
+    else:
+        logger.warning("Fetched DataFrame is empty. Nothing saved.")
+
     return df
 
 
-# PDF generation class
 def generate_pdf(df, output_path="merchant_metrics.pdf"):
+    logger.info("Starting PDF generation.")
     df = df.fillna("N/A")
     c = canvas.Canvas(output_path, pagesize=A4)
     width, height = A4
 
-    # --- Title Page ---
     c.setFont("Helvetica-Bold", 24)
     c.drawCentredString(width / 2, height / 2, "Live Monitoring Report")
     c.showPage()
 
-    # time suffixes and labels
     time_suffixes = ["_now", "_7d", "_wow", "_global"]
-    header = ["Metric", "Last 24 hours", "Last 7 Days", "(WoW - Last 24 hrs)", "Lifetime"]
+    header = ["Metric", "Last 24 hours", "Last 7 Days", "WoW - Last 24 hrs", "Lifetime"]
 
     def group_metrics(columns):
         base = {}
@@ -238,21 +232,17 @@ def generate_pdf(df, output_path="merchant_metrics.pdf"):
 
     grouped_metrics = group_metrics(df.columns)
 
-    # --- Pages per Merchant ---
     for _, row in df.iterrows():
         merchant_id = row["merchant_id"]
         merchant_name = row["merchant_name"]
-        c.setFont("Helvetica-Bold", 16)
-        c.drawString(
-            1 * inch, height - 1 * inch,
-            f"{merchant_name} (Merchant ID: {merchant_id})"
-        )
+        logger.info(f"Adding merchant {merchant_name} (ID: {merchant_id}) to PDF.")
 
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(1 * inch, height - 1 * inch, f"{merchant_name} (Merchant ID: {merchant_id})")
         y = height - 1.5 * inch
-        x = 1 * inch
+        x = 0.7 * inch
         table_w = width - 2 * x
         col_w = [table_w * 0.25] + [table_w * 0.1875] * 4
-
 
         hdr_tbl = Table([header], colWidths=col_w)
         hdr_tbl.setStyle(TableStyle([
@@ -279,32 +269,21 @@ def generate_pdf(df, output_path="merchant_metrics.pdf"):
                     wow_val = row.get(col) if col else None
                     if isinstance(wow_val, float) and isinstance(now_val, float):
                         diff = wow_val - now_val
-                        if diff==0:
-                            if "count" in metric:
-                                val = f"{int(v):,}"
-                            else:
-                                val = f"{diff:,.2f}"
-                        else:
-                            if "count" in metric:
-                                val = f"{int(v):+,}"
-                            else:
-                                val = f"{diff:+,.2f}"
+                        val = f"{diff:+,.2f}" if diff else (f"{int(diff):,}" if "count" in metric else f"{diff:,.2f}")
                     else:
                         val = "N/A"
                 else:
                     v = row.get(col) if col else None
                     if isinstance(v, float):
-                        if "count" in metric: val = f"{int(v):,}" 
-                        else: val = f"{v:,.2f}"
+                        val = f"{int(v):,}" if "count" in metric else f"{v:,.2f}"
                     elif v == "N/A" or pd.isna(v):
                         val = "N/A"
                     else:
                         val = f"{int(v):,}"
 
-                # Format with % or $ if applicable
-                if "rate" in metric and val.replace(",","").replace(".", "").isdigit():
+                if "rate" in metric and val.replace(",", "").replace(".", "").isdigit():
                     val = f"{val}%"
-                elif "value" in metric and val.replace(",","").replace(".", "").isdigit():
+                elif "value" in metric and val.replace(",", "").replace(".", "").isdigit():
                     val = f"${val}"
 
                 vals.append(val)
@@ -333,17 +312,18 @@ def generate_pdf(df, output_path="merchant_metrics.pdf"):
         c.showPage()
 
     c.save()
+    logger.info(f"PDF generated at {output_path}")
     return os.path.abspath(output_path)
 
 
 def send_email_report(pdfs):
+    logger.info("Starting to send email report.")
     msg = EmailMessage()
     msg['Subject'] = 'Daily Live Monitoring Reports'
     msg['From'] = EMAIL_USER
     msg['To'] = ', '.join(EMAIL_RECIPIENTS)
     msg.set_content('Attached are the daily live monitoring reports.')
 
-    
     with open(pdfs, 'rb') as f:
         data = f.read()
         msg.add_attachment(data, maintype='application', subtype='pdf', filename=os.path.basename(pdfs))
@@ -352,47 +332,26 @@ def send_email_report(pdfs):
         smtp.starttls()
         smtp.login(EMAIL_USER, EMAIL_PASSWORD)
         smtp.send_message(msg)
-    print('Email sent.')
-
-# def send_slack_dm(text):
-#     for email in EMAIL_RECIPIENTS:
-#         try:
-#             # 1. Lookup user ID by email
-#             resp = slack_client.users_lookupByEmail(email=email)
-#             user_id = resp['user']['id']
-
-#             # 2. Open or get DM channel
-#             dm = slack_client.conversations_open(users=user_id)
-#             dm_channel = dm['channel']['id']
-
-#             # 3. Send the message
-#             slack_client.chat_postMessage(channel=dm_channel, text=text)
-#             print(f"Sent DM to {email}")
-#         except SlackApiError as e:
-#             print(f"Slack error for {email}: {e.response['error']}")
+    logger.info('Email sent successfully.')
 
 
 def scheduled_job():
+    logger.info("Scheduled job started.")
     df = fetch_and_save_local()
     if not df.empty:
         pdfs = generate_pdf(df)
-        print("pdf generated")
         send_email_report(pdfs)
         # send_slack_dm(pdfs)
     else:
-        print("No data available for today's date. Skipping PDF/email generation.")
+        logger.warning("No data available for today's date. Skipping PDF/email generation.")
 
 # -----------------
 # Scheduler Setup
 # -----------------
 if __name__ == '__main__':
-    print("started scheduling")
     scheduled_job()
     scheduler = BlockingScheduler()
-    # scheduler.add_job(scheduled_job, 'interval', minutes=1)  # Run every 2 minutes
-    print("Scheduler started. Press Ctrl+C to exit.")
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
-        pass
-
+        logger.info("Scheduler stopped manually.")
